@@ -107,13 +107,13 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>C:\Users\712769\Workspace\lab-i-final-lab-ScottWhite2004;C:\Users\712769\Workspace\lab-i-final-lab-ScottWhite2004\GLFW\include;C:\VulkanSDK\1.4.313.2\Include;C:\VulkanSDK\1.4.328.1\Include;c:\Software\tinyobjloader\include;c:\Software\stb\include;c:\Software\glfw-3.4.bin.WIN64\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\712769\Workspace\Vulkan-Engine;C:\Users\712769\Workspace\Vulkan-Engine\Include\GLFW\include;C:\Users\712769\Workspace\Vulkan-Engine\Include;C:\Users\712769\Workspace\lab-i-final-lab-ScottWhite2004;C:\Users\712769\Workspace\lab-i-final-lab-ScottWhite2004\GLFW\include;C:\VulkanSDK\1.4.313.2\Include;C:\VulkanSDK\1.4.328.1\Include;c:\Software\tinyobjloader\include;c:\Software\stb\include;c:\Software\glfw-3.4.bin.WIN64\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>C:\Users\712769\Workspace\lab-i-final-lab-ScottWhite2004\GLFW\lib-vc2022;C:\VulkanSDK\1.4.313.2\Lib;C:\VulkanSDK\1.4.328.1\Lib;c:\Software\glfw-3.4.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>C:\Users\712769\Workspace\Vulkan-Engine\Include\GLFW\lib-vc2022;C:\Users\712769\Workspace\lab-i-final-lab-ScottWhite2004\GLFW\lib-vc2022;C:\VulkanSDK\1.4.313.2\Lib;C:\VulkanSDK\1.4.328.1\Lib;c:\Software\glfw-3.4.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>vulkan-1.lib;glfw3dll.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
