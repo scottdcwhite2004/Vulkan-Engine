@@ -50,7 +50,6 @@ void main() {
     vec4 color = texture(sceneTexture, uv);
     float mask = texture(uMask, uv).r;
 
-    if (mask > 0.5) {
         vec3 original = texture(sceneTexture, uv).rgb;
         vec2 pixelSize = 1.0 / vec2(textureSize(sceneTexture, 0));
 
@@ -63,19 +62,9 @@ void main() {
         vec3 fireTint = mix(fireTintLow, fireTintHigh, t);
         original *= fireTint;
 
-        if (original.r <= 0.001) {
-            original = vec3(
-                fireTint.x * blurred.x * 25.0,
-                fireTint.y * blurred.y * 25.0,
-                fireTint.z * blurred.z * 25.0
-            );
-        }
 
         original += blurred;
         original *= blurred * 3.0;
 
         outColor = vec4(original, 1.0);
-    } else {
-        outColor = color;
-    }
 }

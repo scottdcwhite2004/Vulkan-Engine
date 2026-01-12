@@ -14,7 +14,9 @@ class Cactus final : public IWorldObject
     float _growthRate = 0.02f;
     float _currentHeight = 0.1f;
     float timeSinceRain = 0.0f;
-    float timeToBurn = 10.0f;
+    float timeToBurn = 3.0f;
+	float timeSinceBurned = 0.0f;
+	float burnDuration = 10.0f;
 
     bool _isBurning = false;
     bool _isRaining = false;

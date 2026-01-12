@@ -4,6 +4,14 @@ const int MAX_LIGHTS = 8;
 
 layout(set = 0, binding = 1) uniform sampler2D uTexture;
 
+// Shadow UBO + sampler in set 1:
+// binding 0 = light matrices, binding 1 = depth sampler (compare sampler)
+layout(std140, set = 1, binding = 0) uniform ShadowUBO {
+    mat4 lightView;
+    mat4 lightProj;
+} shadowUBO;
+layout(set = 1, binding = 1) uniform sampler2DShadow uShadowMap;
+
 layout(std140, set = 0, binding = 0) uniform UniformBufferObject {
     mat4 model;
     mat4 view;
@@ -74,7 +82,8 @@ void main() {
         float attenuation = 1.0;
         float cone = 1.0;
 
-        if (L.type == 1u) {
+        bool isDirectional = (L.type == 1u);
+        if (isDirectional) {
             // Directional
             Ldir = normalize(-L.direction);
         } else {
@@ -100,7 +109,32 @@ void main() {
         float specPow = pow(NdotH, max(lighting.shininess, 1.0));
         vec3 specular = L.specular * specPow * L.color;
 
-        colorAccum += (ambientTerm + diffuse + specular) * attenuation * cone;
+        // Shadow calculation (directional lights only)
+        float shadow = 1.0;
+        if (isDirectional) {
+            // transform world pos into light clip space, then NDC -> [0,1]
+            vec4 lightSpace = shadowUBO.lightProj * shadowUBO.lightView * vec4(vWorldPos, 1.0);
+            // perspective divide
+            lightSpace /= lightSpace.w;
+            vec3 projCoords = lightSpace.xyz * 0.5 + 0.5;
+
+            // basic bias to reduce acne (can tune per-scene)
+            float bias = max(0.0015, 0.005 * (1.0 - NdotL));
+
+            // Only sample when inside light frustum; outside use lit (border sampler is white)
+            if (projCoords.x >= 0.0 && projCoords.x <= 1.0 &&
+                projCoords.y >= 0.0 && projCoords.y <= 1.0 &&
+                projCoords.z >= 0.0 && projCoords.z <= 1.0) {
+                // sampler2DShadow expects (s, t, ref). We subtract bias from the reference depth.
+                shadow = texture(uShadowMap, vec3(projCoords.xy, projCoords.z - bias));
+                // result: 1.0 = lit, 0.0 = in shadow (with hardware compare & linear filtering gives PCF-like)
+            } else {
+                shadow = 1.0;
+            }
+        }
+
+        // Apply shadow only to direct lighting (diffuse + specular). Ambient remains.
+        colorAccum += ambientTerm + (diffuse + specular) * shadow * attenuation * cone;
     }
 
     outColor = vec4(colorAccum, 1.0);

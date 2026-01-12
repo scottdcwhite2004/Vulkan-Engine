@@ -104,6 +104,11 @@ struct TimeUBO
     float pad2;
 };
 
+struct ShadowUBO {
+    alignas(16) glm::mat4 lightView;
+    alignas(16) glm::mat4 lightProj;
+};
+
 std::vector<Vertex> vertices = {
     // -X -Y +Z
     { {-1.0f, -1.0f,  1.0f}, {0,0,0}, {0,0} },
@@ -207,6 +212,22 @@ private:
     VkDeviceMemory textureImageMemory;
     VkImageView textureImageView;
     VkSampler textureSampler;
+
+    VkImage shadowImage;
+	VkDeviceMemory shadowImageMemory;
+	VkImageView shadowImageView;
+	VkSampler shadowSampler;
+
+	VkRenderPass shadowRenderPass = VK_NULL_HANDLE;
+	VkFramebuffer shadowFrameBuffer = VK_NULL_HANDLE;
+
+	VkPipeline shadowPipeline = VK_NULL_HANDLE;
+	VkPipelineLayout shadowPipelineLayout = VK_NULL_HANDLE;
+	VkDescriptorSetLayout shadowDescriptorSetLayout = VK_NULL_HANDLE;
+    std::vector<VkBuffer> shadowUniformBuffers;
+	std::vector<VkDeviceMemory> shadowUniformBuffersMemory;
+	std::vector<void*> shadowUniformBuffersMapped;
+	std::vector<VkDescriptorSet> shadowDescriptorSets;
 
     VkBuffer vertexBuffer;
     VkDeviceMemory vertexBufferMemory;
@@ -359,6 +380,9 @@ private:
         createImageViews();
         createRenderPass();
         createDescriptorSetLayout();
+		createShadowDescriptorSetLayoutOnly();
+		createDescriptorPool();
+        createShadowResources();
         createGraphicsPipeline();
 		createPhongPipeline();
 		createGouraudPipeline();
@@ -416,10 +440,6 @@ private:
 			lightinBufferInfos[i].offset = 0;
 			lightinBufferInfos[i].range = sizeof(LightingUBOCPU);
         }
-
-
-        createDescriptorPool();
-
 
 		createParticlePipeline();
 
@@ -496,6 +516,297 @@ private:
         createSyncObjects();
 
 		_lastFrameTime = std::chrono::steady_clock::now();
+    }
+
+    void createShadowResources()
+    {
+        // 1) Depth image used as sampled shadow map
+        VkFormat shadowFormat = VK_FORMAT_D32_SFLOAT;
+        createImage(swapChainExtent.width, swapChainExtent.height, shadowFormat, VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, shadowImage, shadowImageMemory);
+
+        shadowImageView = createImageView(shadowImage, shadowFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+        // 2) sampler (use compare sampler for sampler2DShadow)
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE; // common for shadow maps
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerInfo.compareEnable = VK_TRUE;
+        samplerInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL; // for sampler2DShadow
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = 1.0f;
+
+        if (vkCreateSampler(device, &samplerInfo, nullptr, &shadowSampler) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create shadow sampler!");
+        }
+
+        // 3) Shadow render pass (depth-only)
+        VkAttachmentDescription depthAttachment{};
+        depthAttachment.format = shadowFormat;
+        depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // we want depth written so we can sample
+        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthRef{};
+        depthRef.attachment = 0;
+        depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 0;
+        subpass.pDepthStencilAttachment = &depthRef;
+
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dep.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dep.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 1;
+        rpci.pAttachments = &depthAttachment;
+        rpci.subpassCount = 1;
+        rpci.pSubpasses = &subpass;
+        rpci.dependencyCount = 1;
+        rpci.pDependencies = &dep;
+
+        if (vkCreateRenderPass(device, &rpci, nullptr, &shadowRenderPass) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create shadow render pass!");
+        }
+
+        // 4) Framebuffer
+        VkFramebufferCreateInfo fbci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fbci.renderPass = shadowRenderPass;
+        fbci.attachmentCount = 1;
+        fbci.pAttachments = &shadowImageView;
+        fbci.width = swapChainExtent.width;
+        fbci.height = swapChainExtent.height;
+        fbci.layers = 1;
+        if (vkCreateFramebuffer(device, &fbci, nullptr, &shadowFrameBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create shadow framebuffer!");
+        }
+
+        // 5) Shadow descriptor set layout (single UBO for light matrices at set=1)
+        if (shadowDescriptorSetLayout == VK_NULL_HANDLE)
+        {
+            VkDescriptorSetLayoutBinding shUboBinding{};
+            shUboBinding.binding = 0;
+            shUboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            shUboBinding.descriptorCount = 1;
+            shUboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            shUboBinding.pImmutableSamplers = nullptr;
+
+            VkDescriptorSetLayoutBinding shSamplerBinding{};
+            shSamplerBinding.binding = 1;
+            shSamplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            shSamplerBinding.descriptorCount = 1;
+            shSamplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            shSamplerBinding.pImmutableSamplers = nullptr;
+
+            std::array<VkDescriptorSetLayoutBinding, 2> shBindings = { shUboBinding, shSamplerBinding };
+            VkDescriptorSetLayoutCreateInfo shLayoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            shLayoutInfo.bindingCount = static_cast<uint32_t>(shBindings.size());
+            shLayoutInfo.pBindings = shBindings.data();
+            if (vkCreateDescriptorSetLayout(device, &shLayoutInfo, nullptr, &shadowDescriptorSetLayout) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create shadow descriptor set layout!");
+            }
+        }
+
+        // 6) Shadow uniform buffers (per-frame)
+        VkDeviceSize shUBOSize = sizeof(ShadowUBO);
+        shadowUniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        shadowUniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+        shadowUniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            createBuffer(shUBOSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                shadowUniformBuffers[i], shadowUniformBuffersMemory[i]);
+            if (vkMapMemory(device, shadowUniformBuffersMemory[i], 0, shUBOSize, 0, &shadowUniformBuffersMapped[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to map shadow UBO");
+            }
+        }
+
+        // 7) Allocate descriptor sets for shadow (re-using existing descriptorPool)
+        std::vector<VkDescriptorSetLayout> shLayouts(MAX_FRAMES_IN_FLIGHT, shadowDescriptorSetLayout);
+        VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        allocInfo.pSetLayouts = shLayouts.data();
+
+        shadowDescriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+        if (vkAllocateDescriptorSets(device, &allocInfo, shadowDescriptorSets.data()) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate shadow descriptor sets!");
+        }
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            VkDescriptorBufferInfo bufInfo{};
+            bufInfo.buffer = shadowUniformBuffers[i];
+            bufInfo.offset = 0;
+            bufInfo.range = sizeof(ShadowUBO);
+
+            VkDescriptorImageInfo imgInfo{};
+            imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; // we will transition after render
+            imgInfo.imageView = shadowImageView;
+            imgInfo.sampler = shadowSampler;
+
+            std::array<VkWriteDescriptorSet, 2> writes{};
+            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet = shadowDescriptorSets[i];
+            writes[0].dstBinding = 0;
+            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[0].descriptorCount = 1;
+            writes[0].pBufferInfo = &bufInfo;
+
+            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet = shadowDescriptorSets[i];
+            writes[1].dstBinding = 1;
+            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[1].descriptorCount = 1;
+            writes[1].pImageInfo = &imgInfo;
+
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        }
+
+        // 8) shadow pipeline - very simple vertex shader that transforms by light matrices and no color output
+        auto vsCode = readFile("shaders/shadow.vert.spv");
+        auto fsCode = readFile("shaders/shadow.frag.spv");
+        VkShaderModule vs = createShaderModule(vsCode);
+        VkShaderModule fs = createShaderModule(fsCode);
+
+        // Use only position attribute (location = 0) to match shadow.vert which consumes only position.
+        auto bindingDesc = Vertex::getBindingDescription(); // reuse stride/binding
+        VkVertexInputAttributeDescription posAttr{};
+        posAttr.location = 0;
+        posAttr.binding = bindingDesc.binding;
+        posAttr.format = VK_FORMAT_R32G32B32_SFLOAT;
+        posAttr.offset = static_cast<uint32_t>(offsetof(Vertex, pos));
+
+        VkPipelineVertexInputStateCreateInfo vi{};
+        vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &bindingDesc;
+        vi.vertexAttributeDescriptionCount = 1;
+        vi.pVertexAttributeDescriptions = &posAttr;
+
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        // pViewports/pScissors intentionally left NULL because we'll declare them dynamic below.
+
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_BACK_BIT;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth = 1.0f;
+
+        VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        ds.depthTestEnable = VK_TRUE;
+        ds.depthWriteEnable = VK_TRUE;
+        ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        // Make viewport and scissor dynamic to avoid providing pViewports/pScissors here.
+        std::vector<VkDynamicState> dyn{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dsi{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dsi.dynamicStateCount = static_cast<uint32_t>(dyn.size());
+        dsi.pDynamicStates = dyn.data();
+
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vs;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fs;
+        stages[1].pName = "main";
+
+        // Pipeline layout: set 0 = existing descriptorSetLayout (model/view/proj UBO) ; set 1 = shadowDescriptorSetLayout
+        VkDescriptorSetLayout setLayoutsArr[2] = { descriptorSetLayout, shadowDescriptorSetLayout };
+
+        VkPipelineLayoutCreateInfo pli{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        if (shadowDescriptorSetLayout != VK_NULL_HANDLE) {
+            pli.setLayoutCount = 2;
+            pli.pSetLayouts = setLayoutsArr;
+        }
+        else {
+            pli.setLayoutCount = 1;
+            pli.pSetLayouts = &descriptorSetLayout;
+        }
+
+        if (vkCreatePipelineLayout(device, &pli, nullptr, &shadowPipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create shadow pipeline layout!");
+        }
+
+        VkGraphicsPipelineCreateInfo gpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gpci.stageCount = 2;
+        gpci.pStages = stages;
+        gpci.pVertexInputState = &vi;
+        gpci.pInputAssemblyState = &ia;
+        gpci.pViewportState = &vp;
+        gpci.pRasterizationState = &rs;
+        gpci.pDepthStencilState = &ds;
+        gpci.pMultisampleState = &ms;
+        gpci.pDynamicState = &dsi; // viewport & scissor are dynamic
+        gpci.layout = shadowPipelineLayout;
+        gpci.renderPass = shadowRenderPass;
+        gpci.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &shadowPipeline) != VK_SUCCESS) {
+            vkDestroyShaderModule(device, fs, nullptr);
+            vkDestroyShaderModule(device, vs, nullptr);
+            throw std::runtime_error("failed to create shadow pipeline!");
+        }
+
+        vkDestroyShaderModule(device, fs, nullptr);
+        vkDestroyShaderModule(device, vs, nullptr);
+	}
+
+    void createShadowDescriptorSetLayoutOnly()
+    {
+        if (shadowDescriptorSetLayout != VK_NULL_HANDLE) return;
+
+        VkDescriptorSetLayoutBinding shUboBinding{};
+        shUboBinding.binding = 0;
+        shUboBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        shUboBinding.descriptorCount = 1;
+        shUboBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        shUboBinding.pImmutableSamplers = nullptr;
+
+        VkDescriptorSetLayoutBinding shSamplerBinding{};
+        shSamplerBinding.binding = 1;
+        shSamplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        shSamplerBinding.descriptorCount = 1;
+        shSamplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        shSamplerBinding.pImmutableSamplers = nullptr;
+
+        std::array<VkDescriptorSetLayoutBinding, 2> shBindings = { shUboBinding, shSamplerBinding };
+        VkDescriptorSetLayoutCreateInfo shLayoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        shLayoutInfo.bindingCount = static_cast<uint32_t>(shBindings.size());
+        shLayoutInfo.pBindings = shBindings.data();
+        if (vkCreateDescriptorSetLayout(device, &shLayoutInfo, nullptr, &shadowDescriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create shadow descriptor set layout!");
+        }
     }
 
     void createMaskImage()
@@ -944,12 +1255,17 @@ private:
         dsi.dynamicStateCount = static_cast<uint32_t>(dyn.size());
         dsi.pDynamicStates = dyn.data();
 
+        VkPushConstantRange pushRange{};
+		pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		pushRange.offset = 0;
+		pushRange.size = sizeof(bool);
+
         VkPipelineLayoutCreateInfo pli{};
         pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pli.setLayoutCount = 1;
         pli.pSetLayouts = &postProcessDescriptorSetLayout;
         pli.pushConstantRangeCount = 0;
-        pli.pPushConstantRanges = nullptr;
+		pli.pPushConstantRanges = &pushRange;
         if (vkCreatePipelineLayout(device, &pli, nullptr, &postProcessPipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create postprocess pipeline layout!");
         }
@@ -2155,7 +2471,14 @@ private:
 		timeLayoutBinding.pImmutableSamplers = nullptr;
 		timeLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        std::array<VkDescriptorSetLayoutBinding, 4> bindings = { uboLayoutBinding, samplerLayoutBinding, lightingLayoutBinding, timeLayoutBinding };
+		VkDescriptorSetLayoutBinding shadowLayoutBinding{};
+		shadowLayoutBinding.binding = 4;
+		shadowLayoutBinding.descriptorCount = 1;
+		shadowLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		shadowLayoutBinding.pImmutableSamplers = nullptr;
+		shadowLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        std::array<VkDescriptorSetLayoutBinding, 5> bindings = { uboLayoutBinding, samplerLayoutBinding, lightingLayoutBinding, timeLayoutBinding, shadowLayoutBinding };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -2257,8 +2580,15 @@ private:
 
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = 1;
-        pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+        if (shadowDescriptorSetLayout != VK_NULL_HANDLE) {
+            VkDescriptorSetLayout setLayoutsArr[2] = { descriptorSetLayout, shadowDescriptorSetLayout };
+            pipelineLayoutInfo.setLayoutCount = 2;
+            pipelineLayoutInfo.pSetLayouts = setLayoutsArr;
+        }
+        else {
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+        }
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create pipeline layout!");
@@ -2636,42 +2966,55 @@ private:
     }
 
     void createDescriptorPool() {
-        // Per-frame sets
+        // Per-frame descriptor sets (frame UBOs)
         const uint32_t frameSets = MAX_FRAMES_IN_FLIGHT;
 
-        // Shapes (+1 globe) each allocate MAX_FRAMES_IN_FLIGHT sets
-        const uint32_t shapeCount = static_cast<uint32_t>(_shapes.size()) + 1; // +1 for _globe
-        const uint32_t shapeSets = shapeCount * MAX_FRAMES_IN_FLIGHT;
-
-        // Scene objects also allocate sets in GlobeScene::uploadScene(...)
-        const uint32_t sceneObjectCount = static_cast<uint32_t>(_scene.getObjects().size());
-        const uint32_t sceneSets = sceneObjectCount * MAX_FRAMES_IN_FLIGHT;
+        // Use conservative upper bounds because the pool is created before shapes/scene are populated.
+        // Adjust these if your scene may require more descriptor sets.
+        const uint32_t maxShapes = 32;         // conservative max number of Shapes (including globe)
+        const uint32_t maxSceneObjects = 256;  // conservative max number of scene objects
+        const uint32_t shapeSets = maxShapes * MAX_FRAMES_IN_FLIGHT;
+        const uint32_t sceneSets = maxSceneObjects * MAX_FRAMES_IN_FLIGHT;
 
         // Skybox: single set
         const uint32_t skyboxSets = 1;
 
-        // Particle compute (if any) – keep as before
+        // Particle compute sets (if any)
         const uint32_t computeSets = 2;
 
-        const uint32_t totalSets = frameSets + shapeSets + sceneSets + skyboxSets + computeSets;
+        // Shadow descriptor sets (per-frame)
+        const uint32_t shadowSets = MAX_FRAMES_IN_FLIGHT;
 
-        // Layout bindings per set: 0 (UBO), 1 (sampler), 2 (lighting UBO), 3 (time UBO)
+        // Total sets we must support
+        const uint32_t totalSets = frameSets + shapeSets + sceneSets + skyboxSets + computeSets + shadowSets;
+
+        // Layout bindings per main set:
+        // - UBOs at bindings 0,2,3 (3 UBOS)
+        // - Combined image samplers at bindings 1 and 4 (texture + shadow)
         const uint32_t ubosPerSet = 3;      // bindings 0, 2, 3
-        const uint32_t samplersPerSet = 1;  // binding 1
+        const uint32_t samplersPerSet = 2; // bindings 1 and 4
 
         // Aggregate descriptor counts
         const uint32_t totalUboDescriptors =
             (frameSets + shapeSets + sceneSets) * ubosPerSet
-            + computeSets * 1; // parameter UBO for compute
+            // shadow sets also contain a uniform buffer (shadow UBO)
+            + shadowSets * 1
+            // compute parameter UBOs
+            + computeSets * 1;
 
         const uint32_t totalSamplerDescriptors =
-            (frameSets + shapeSets + sceneSets + skyboxSets) * samplersPerSet;
+            // main sets have two samplers each (texture + shadow)
+            (frameSets + shapeSets + sceneSets) * samplersPerSet
+            // skybox has one cubemap sampler
+            + skyboxSets * 1
+            // shadow descriptor sets include one sampler each
+            + shadowSets * 1;
 
         const uint32_t totalStorageDescriptors =
             computeSets * 2; // storage buffers for compute
 
         // Safety margin for fragmentation and future growth
-        const uint32_t safety = 32;
+        const uint32_t safety = 64;
 
         std::array<VkDescriptorPoolSize, 3> poolSizes{};
         poolSizes[0] = { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  totalUboDescriptors + safety };
@@ -2954,6 +3297,59 @@ private:
             throw std::runtime_error("failed to begin recording command buffer!");
 		}
 
+        // Begin shadow pass
+        std::array<VkClearValue, 1> shadowClear{};
+        shadowClear[0].depthStencil = { 1.0f, 0 };
+
+        VkRenderPassBeginInfo shadowRp{};
+        shadowRp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        shadowRp.renderPass = shadowRenderPass;
+        shadowRp.framebuffer = shadowFrameBuffer;
+        shadowRp.renderArea.extent = swapChainExtent;
+        shadowRp.clearValueCount = static_cast<uint32_t>(shadowClear.size());
+        shadowRp.pClearValues = shadowClear.data();
+
+        vkCmdBeginRenderPass(commandBuffer, &shadowRp, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport shadowVp{ 0.f, 0.f, (float)swapChainExtent.width, (float)swapChainExtent.height, 0.f, 1.f };
+        VkRect2D shadowSc{ {0,0}, swapChainExtent };
+        vkCmdSetViewport(commandBuffer, 0, 1, &shadowVp);
+        vkCmdSetScissor(commandBuffer, 0, 1, &shadowSc);
+
+        // bind shadow pipeline and descriptor sets (set0 = frame UBOs, set1 = shadow set)
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline);
+        VkDescriptorSet setsShadow[] = { descriptorSets[currentFrame], shadowDescriptorSets[currentFrame] };
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout, 0, 2, setsShadow, 0, nullptr);
+
+        // draw shapes similarly to your other passes (mesh/shape draw accept pipeline + layout)
+        _mesh.draw(commandBuffer, shadowPipeline, shadowPipelineLayout, currentFrame);
+        _cylinder.draw(commandBuffer, shadowPipeline, shadowPipelineLayout, currentFrame);
+        _scene.drawScene(commandBuffer, shadowPipelineLayout, shadowPipeline, currentFrame); // adjust if signature differs
+        _globe.draw(commandBuffer, shadowPipeline, shadowPipelineLayout, currentFrame);
+
+        vkCmdEndRenderPass(commandBuffer);
+
+        // After render, transition shadowImage to SHADER_READ_ONLY_OPTIMAL for sampling
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = shadowImage;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+
         // ----- Pass 1: scene to offscreen framebuffer -----
         std::array<VkClearValue, 2> offscreenClears{};
         offscreenClears[0].color = { {0.f, 0.f, 0.f, 1.f} };
@@ -2997,60 +3393,13 @@ private:
         vkCmdSetViewport(commandBuffer, 0, 1, &vp);
         vkCmdSetScissor(commandBuffer, 0, 1, &sc);
 
-        // Bind scene pipeline + descriptors and draw your shapes
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, sceneOffscreenPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, phongPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
             0, 1, &descriptorSets[currentFrame], 0, nullptr);
-        // Draw your scene objects
-		_scene.drawPostProcessables(commandBuffer, pipelineLayout, sceneOffscreenPipeline, currentFrame);
+
+		_scene.drawPostProcessables(commandBuffer, pipelineLayout, phongPipeline, currentFrame);
 
         vkCmdEndRenderPass(commandBuffer);
-
-        VkClearValue clearMask{};
-        clearMask.color = { {0.0f, 0.0f, 0.0f, 0.0f} };
-
-        VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-        rpbi.renderPass = maskRenderPass;
-        rpbi.framebuffer = maskFramebuffer;
-        rpbi.renderArea.offset = { 0, 0 };
-        rpbi.renderArea.extent = swapChainExtent;
-        rpbi.clearValueCount = 1;
-        rpbi.pClearValues = &clearMask;
-
-        vkCmdBeginRenderPass(commandBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, maskPipeline);
-
-        VkViewport viewport{ 0.0f, 0.0f, (float)swapChainExtent.width, (float)swapChainExtent.height, 0.0f, 1.0f };
-        VkRect2D scissor{ {0, 0}, swapChainExtent };
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-        _scene.drawPostProcessables(commandBuffer, pipelineLayout, maskPipeline, currentFrame);
-
-        vkCmdEndRenderPass(commandBuffer);
-
-        // After vkCmdEndRenderPass(commandBuffer); for the mask pass, add:
-        VkImageMemoryBarrier maskToSample{};
-        maskToSample.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        maskToSample.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        maskToSample.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        // Final layout of the mask render pass is SHADER_READ_ONLY, keep same layout and just ensure visibility.
-        maskToSample.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        maskToSample.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        maskToSample.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        maskToSample.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        maskToSample.image = maskImage;
-        maskToSample.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        maskToSample.subresourceRange.baseMipLevel = 0;
-        maskToSample.subresourceRange.levelCount = 1;
-        maskToSample.subresourceRange.baseArrayLayer = 0;
-        maskToSample.subresourceRange.layerCount = 1;
-
-        vkCmdPipelineBarrier(
-            commandBuffer,
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &maskToSample);
 
 		offscreenInitialized = true;
 
@@ -3073,10 +3422,6 @@ private:
         vkCmdSetViewport(commandBuffer, 0, 1, &vp);
         vkCmdSetScissor(commandBuffer, 0, 1, &sc);
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postProcessPipeline);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            postProcessPipelineLayout, 0, 1, &postProcessDescriptorSets[currentFrame], 0, nullptr);
-
         // Draw fullscreen triangle/quad
         vkCmdDraw(commandBuffer, 6, 1, 0, 0);
 
@@ -3086,12 +3431,12 @@ private:
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
 
             // Bind both descriptor sets: frame UBO set (set 0) and skybox cubemap set (set 1)
-                VkDescriptorSet sets[] = { descriptorSets[currentFrame], skyboxDescriptorSet };
-                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout,
-                    0, 2, sets, 0, nullptr);
+            VkDescriptorSet sets[] = { descriptorSets[currentFrame], skyboxDescriptorSet };
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout,
+                0, 2, sets, 0, nullptr);
 
-                    // Bind skybox vertex/index buffers (use your cube geometry)
-                VkBuffer vertexBuffers[] = { vertexBuffer };
+            // Bind skybox vertex/index buffers (use your cube geometry)
+            VkBuffer vertexBuffers[] = { vertexBuffer };
             VkDeviceSize offsets[] = { 0 };
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
             vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
@@ -3100,15 +3445,13 @@ private:
             vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
         }
 
-		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gouraudPipeline);
-		_mesh.draw(commandBuffer, gouraudPipeline, pipelineLayout, currentFrame);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gouraudPipeline);
+        _mesh.draw(commandBuffer, gouraudPipeline, pipelineLayout, currentFrame);
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, phongPipeline);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-			0, 1, &descriptorSets[currentFrame], 0, nullptr);
-		_cylinder.draw(commandBuffer, phongPipeline, pipelineLayout, currentFrame);
-
-		_scene.drawScene(commandBuffer, pipelineLayout, phongPipeline, currentFrame);
+		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, phongPipeline);
+        
+        _cylinder.draw(commandBuffer, phongPipeline, pipelineLayout, currentFrame);
+        _scene.drawScene(commandBuffer, pipelineLayout, phongPipeline, currentFrame);
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particlePipeline);
 
@@ -3116,8 +3459,15 @@ private:
             sys.recordDraw(commandBuffer, particlePipeline, particleQuadVB, particleQuadIB, particleQuadIndexCount);
         }
 
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postProcessPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            postProcessPipelineLayout, 0, 1, &postProcessDescriptorSets[currentFrame], 0, nullptr);
+
+
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, outlinePipeline);
         _globe.draw(commandBuffer, outlinePipeline, pipelineLayout, currentFrame);
+
+
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -3240,6 +3590,23 @@ private:
             _lights[1].setColor(moonColor);
             _lights[1].setAmbient(moonAmbient);
             _lights[1].setSpecular(moonSpecular);
+        }
+
+        if (_lights.size() > 0)
+        {
+            // example for directional light: use an orthographic projection that covers scene extents
+            glm::vec3 lightDir = glm::normalize(_lights[0].toGPULight().direction); // or _lights[0].getDirectionWS()
+            glm::vec3 center = glm::vec3(0.0f); // scene center - pick appropriate bounds
+            glm::vec3 lightPos = center - lightDir * 150.0f; // place light back along direction
+
+            ShadowUBO sh{};
+            sh.lightView = glm::lookAt(lightPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
+
+            const float orthoSize = 120.0f; // adjust to scene
+            sh.lightProj = glm::ortho(-orthoSize, orthoSize, -orthoSize, orthoSize, 1.0f, 400.0f);
+            sh.lightProj[1][1] *= -1; // if your clip-space flips Y for Vulkan
+
+            std::memcpy(shadowUniformBuffersMapped[currentImage], &sh, sizeof(sh));
         }
 
         LightingUBOCPU l{};

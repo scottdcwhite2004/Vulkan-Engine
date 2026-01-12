@@ -72,80 +72,38 @@ void GlobeScene::addObject(IWorldObject* object)
 
 void GlobeScene::drawScene(VkCommandBuffer& commandBuffer, VkPipelineLayout pipelineLayout, VkPipeline graphicsPipeline, uint32_t currentFrame)
 {
+	_postProcessObjects.clear();
     for (auto obj : _objects)
     {
-        obj->draw(commandBuffer, graphicsPipeline, pipelineLayout, currentFrame);
-    }
-    if (_isRaining && _rainParticleSystem)
-    {
-        _rainParticleSystem->recordDraw(commandBuffer, graphicsPipeline, /*quadVB*/ VK_NULL_HANDLE, /*quadIB*/ VK_NULL_HANDLE, /*quadIndexCount*/ 0);
+    //    if (static_cast<Cactus*>(obj))
+    //    {
+    //        if (static_cast<Cactus*>(obj)->isBurning())
+    //        {
+    //            _postProcessObjects.insert(obj);
+    //        }
+    //        else
+    //        {
+				//obj->draw(commandBuffer, graphicsPipeline, pipelineLayout, currentFrame);
+    //        }
+    //    }
+    //    else
+    //    {
+    //        obj->draw(commandBuffer, graphicsPipeline, pipelineLayout, currentFrame);
+    //    }
+		obj->draw(commandBuffer, graphicsPipeline, pipelineLayout, currentFrame);
+
     }
 }
 
 void GlobeScene::updateScene(float deltaTime)
 {
-    // Advance day-night time
     _timeOfDay += deltaTime;
     if (_timeOfDay >= _dayNightCycleDuration) _timeOfDay -= _dayNightCycleDuration;
+    for (auto obj : _objects)
+    {
+        obj->update(deltaTime);
+	}
 
-    // Simple rain schedule
-    timeSinceRain += deltaTime;
-    if (!_isRaining && timeSinceRain >= _rainInterval) {
-        _isRaining = true;
-        timeSinceRain = 0.0f;
-    }
-    else if (_isRaining && timeSinceRain >= _rainDuration) {
-        _isRaining = false;
-        timeSinceRain = 0.0f;
-    }
-
-    // Emit rain if toggled on and system available
-    if (_isRaining && _rainParticleSystem != nullptr && _cameraMgr != nullptr) {
-        const Camera& cam = _cameraMgr->getCurrentCamera();
-        const glm::mat4 view = cam.getViewMatrix();
-        const glm::mat4 invView = glm::inverse(view);
-        const glm::vec3 camPos(invView[3]);
-
-        const glm::vec2 halfXZ{ _rainAreaSize * 0.5f, _rainAreaSize * 0.5f };
-        const float yTop = 30.0f;
-        const float speedMin = std::max(2.0f, _rainParticleSpeed * 0.8f);
-        const float speedMax = _rainParticleSpeed * 1.4f;
-        const float lifeMin = 0.8f;
-        const float lifeMax = 2.5f;
-        const glm::vec2 windXZ{ 1.0f, 0.2f };
-
-        const uint32_t count = static_cast<uint32_t>(2000.0f * deltaTime);
-        _rainParticleSystem->spawnRainArea(glm::vec3(camPos.x, 0.0f, camPos.z),
-            halfXZ, yTop,
-            count, speedMin, speedMax,
-            lifeMin, lifeMax, windXZ);
-    }
-
-    // NEW: Ignite cacti if it's daytime, not raining, and it's been sunny long enough.
-    const bool isDay = (_timeOfDay >= _dayBegin && _timeOfDay < _nightBegin);
-    const bool shouldIgnite = (isDay && !_isRaining && timeSinceRain >= _sunNoRainToIgnite);
-
-    for (auto* obj : _objects) {
-        // update hook
-        float dt = deltaTime;
-        obj->update(dt);
-
-        // If this is a cactus, toggle burning and post-process tag
-        if (auto* cactus = dynamic_cast<Cactus*>(obj)) {
-            if (shouldIgnite && !cactus->isBurning()) {
-                cactus->setBurning(true);
-                setObjectPostProcess(cactus, true);
-            }
-            else if (_isRaining && cactus->isBurning()) {
-                cactus->setBurning(false);
-                setObjectPostProcess(cactus, false);
-            }
-            else {
-                // keep set in sync with the cactus state (handles burn timer expiry)
-                setObjectPostProcess(cactus, cactus->isBurning());
-            }
-        }
-    }
 }
 
 void GlobeScene::drawPostProcessables(VkCommandBuffer& commandBuffer, VkPipelineLayout pipelineLayout, VkPipeline graphicsPipeline, uint32_t currentFrame)

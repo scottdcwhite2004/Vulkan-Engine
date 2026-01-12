@@ -71,7 +71,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>E:\UniTemp\lab-i-final-lab-ScottWhite2004;E:\UniTemp\lab-i-final-lab-ScottWhite2004\GLFW\include;$(IncludePath)</IncludePath>
+    <IncludePath>E:\UniTemp\Vulkan-Engine;E:\UniTemp\Vulkan-Engine\Include\GLFW\include;E:\UniTemp\Vulkan-Engine\Include;$(IncludePath)</IncludePath>
     <LibraryPath>E:\UniTemp\lab-i-final-lab-ScottWhite2004\GLFW\lib-vc2022;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
