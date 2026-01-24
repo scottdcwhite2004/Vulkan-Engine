@@ -112,11 +112,16 @@ void main() {
         // Shadow calculation (directional lights only)
         float shadow = 1.0;
         if (isDirectional) {
-            // transform world pos into light clip space, then NDC -> [0,1]
+            // transform world pos into light clip space
             vec4 lightSpace = shadowUBO.lightProj * shadowUBO.lightView * vec4(vWorldPos, 1.0);
             // perspective divide
             lightSpace /= lightSpace.w;
-            vec3 projCoords = lightSpace.xyz * 0.5 + 0.5;
+
+            // NOTE: GLM is compiled with GLM_FORCE_DEPTH_ZERO_TO_ONE, so NDC.z is already 0..1.
+            // Map X/Y from [-1,1] -> [0,1], but keep Z as-is.
+            vec3 projCoords;
+            projCoords.xy = lightSpace.xy * 0.5 + 0.5;
+            projCoords.z  = lightSpace.z;
 
             // basic bias to reduce acne (can tune per-scene)
             float bias = max(0.0015, 0.005 * (1.0 - NdotL));

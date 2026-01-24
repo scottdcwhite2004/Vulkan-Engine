@@ -3289,13 +3289,13 @@ private:
 
 
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
-        
+
         VkCommandBufferBeginInfo beginInfo{ };
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        if(vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
         {
             throw std::runtime_error("failed to begin recording command buffer!");
-		}
+        }
 
         // Begin shadow pass
         std::array<VkClearValue, 1> shadowClear{};
@@ -3393,15 +3393,15 @@ private:
         vkCmdSetViewport(commandBuffer, 0, 1, &vp);
         vkCmdSetScissor(commandBuffer, 0, 1, &sc);
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, phongPipeline);
+        VkDescriptorSet sets[] = { descriptorSets[currentFrame], shadowDescriptorSets[currentFrame] };
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-            0, 1, &descriptorSets[currentFrame], 0, nullptr);
+            0, 2, sets, 0, nullptr);
 
-		_scene.drawPostProcessables(commandBuffer, pipelineLayout, phongPipeline, currentFrame);
+        _scene.drawPostProcessables(commandBuffer, pipelineLayout, phongPipeline, currentFrame);
 
         vkCmdEndRenderPass(commandBuffer);
 
-		offscreenInitialized = true;
+        offscreenInitialized = true;
 
         // ----- Pass 2: post-process to swapchain framebuffer -----
         std::array<VkClearValue, 2> swapClears{};
@@ -3422,7 +3422,12 @@ private:
         vkCmdSetViewport(commandBuffer, 0, 1, &vp);
         vkCmdSetScissor(commandBuffer, 0, 1, &sc);
 
-        // Draw fullscreen triangle/quad
+        // Bind post-process pipeline + descriptor set BEFORE drawing fullscreen quad
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postProcessPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            postProcessPipelineLayout, 0, 1, &postProcessDescriptorSets[currentFrame], 0, nullptr);
+
+        // Draw fullscreen triangle/quad (now that the pipeline is bound)
         vkCmdDraw(commandBuffer, 6, 1, 0, 0);
 
         if (_globe.WithinBounds(cameraManager.getCurrentCamera().getEye()))
@@ -3448,8 +3453,10 @@ private:
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, gouraudPipeline);
         _mesh.draw(commandBuffer, gouraudPipeline, pipelineLayout, currentFrame);
 
-		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, phongPipeline);
-        
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, phongPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+            0, 2, sets, 0, nullptr);
+
         _cylinder.draw(commandBuffer, phongPipeline, pipelineLayout, currentFrame);
         _scene.drawScene(commandBuffer, pipelineLayout, phongPipeline, currentFrame);
 
@@ -3459,15 +3466,10 @@ private:
             sys.recordDraw(commandBuffer, particlePipeline, particleQuadVB, particleQuadIB, particleQuadIndexCount);
         }
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, postProcessPipeline);
-        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-            postProcessPipelineLayout, 0, 1, &postProcessDescriptorSets[currentFrame], 0, nullptr);
-
-
+        // NOTE: post-process draw already executed earlier
+        // bind outline and draw globe outline
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, outlinePipeline);
         _globe.draw(commandBuffer, outlinePipeline, pipelineLayout, currentFrame);
-
-
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -3683,8 +3685,10 @@ private:
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
-        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
-            throw std::runtime_error("failed to submit draw command buffer!");
+        VkResult submitRes = vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]);
+        if (submitRes != VK_SUCCESS) {
+            std::cerr << "vkQueueSubmit failed with VkResult = " << static_cast<int>(submitRes) << std::endl;
+            throw std::runtime_error("failed to submit draw command buffer! VkResult=" + std::to_string(static_cast<int>(submitRes)));
         }
 
         VkPresentInfoKHR presentInfo{};

@@ -8,29 +8,29 @@ layout(std140, set = 0, binding = 0) uniform UniformBufferObject {
     mat4 proj;
 } ubo;
 
-// Matches CPU GPULightCPU field order and std140 padding
+// Match CPU GPULightCPU field order (std140 will pad vec3 to 16-byte boundaries)
 struct GPULight {
-    // vec3 slots (each needs a trailing float pad in std140)
-    vec3  position;  float pad1;
-    vec3  direction; float pad2;
-    vec3  color;     float pad3;
+    // Vectors first (each vec3 behaves like a vec4 in std140 for alignment/size)
+    vec3 position;
+    vec3 direction;
+    vec3 color;
 
-    // scalar header (4 x 4-byte)
-    uint  type;      float ambient; float specular; float pad0;
+    // Scalars after vectors (match CPU order exactly)
+    uint  type;
+    float ambient;
+    float specular;
 
-    // cone and range
     float innerCos;
     float outerCos;
     float range;
-    float pad4;
 
-    // attenuation
     float attConst;
     float attLinear;
     float attQuadratic;
-    float pad5;
-};
 
+    // Optional pad to keep multiple of 16 if CPU included it; safe to keep for size match
+    float pad0;
+};
 // Matches CPU LightingUBOCPU order: lights[] first, then view/shininess/lightCount/pads
 layout(std140, set = 0, binding = 2) uniform LightingUBO {
     GPULight lights[MAX_LIGHTS];
